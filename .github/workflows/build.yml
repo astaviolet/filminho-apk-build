@@ -1,4 +1,4 @@
-name: Build Filminho APK 1.0.27
+name: Build Filminho APK 1.0.28
 on:
   workflow_dispatch:
 permissions:
@@ -54,13 +54,13 @@ jobs:
           BT="$ANDROID_SDK_ROOT/build-tools/35.0.0"
           APK=$(ls app/build/outputs/apk/release/*.apk | head -n1)
           "$BT/aapt" dump badging "$APK" | head -n1 | tee badging.txt
-          grep -q "package: name='com.filminho.app' versionCode='27' versionName='1.0.27'" badging.txt
+          grep -q "package: name='com.filminho.app' versionCode='28' versionName='1.0.28'" badging.txt
           "$BT/apksigner" verify --verbose "$APK"
           echo "VALIDATION PASS"
       - name: Upload APK (1 day)
         uses: actions/upload-artifact@v4
         with:
-          name: filminho-1.0.27-apk
+          name: filminho-1.0.28-apk
           path: |
             ${{ runner.temp }}/src/app/build/outputs/apk/release/*.apk
             ${{ runner.temp }}/src/app/build/outputs/apk/release/build-verification.txt
