@@ -50,7 +50,7 @@ jobs:
           set -euo pipefail
           cat ci/androidtest.gradle >> app/build.gradle
           mkdir -p app/src/androidTest/java/com/filminho/app
-          cp ci/PlayerEmuladorTest.kt app/src/androidTest/java/com/filminho/app/
+          cp ci/PlayerEmuladorTest.kt ci/SalaEmuladorTest.kt app/src/androidTest/java/com/filminho/app/
           chmod +x gradlew
           ./gradlew --no-daemon -q :app:assembleDebug :app:assembleDebugAndroidTest
       - name: Resolve films (same resolver as the site)
