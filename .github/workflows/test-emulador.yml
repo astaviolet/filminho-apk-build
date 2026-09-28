@@ -1,0 +1,84 @@
+name: Testar player no emulador
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: test-emulador
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Decrypt project (age)
+        env:
+          AGE_KEY: ${{ secrets.AGE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          sudo apt-get install -y -qq age >/dev/null
+          KEYFILE="$RUNNER_TEMP/age.key"
+          printf '%s\n' "$AGE_KEY" > "$KEYFILE"
+          mkdir -p "$RUNNER_TEMP/src"
+          age -d -i "$KEYFILE" -o "$RUNNER_TEMP/in.zip" test-input.zip.age
+          rm -f "$KEYFILE"
+          unzip -q "$RUNNER_TEMP/in.zip" -d "$RUNNER_TEMP/src"
+          rm -f "$RUNNER_TEMP/in.zip"
+          test ! -e "$RUNNER_TEMP/src/app/release.keystore"
+      - name: Build debug + test APKs
+        working-directory: ${{ runner.temp }}/src
+        run: |
+          set -euo pipefail
+          cat ci/androidtest.gradle >> app/build.gradle
+          mkdir -p app/src/androidTest/java/com/filminho/app
+          cp ci/PlayerEmuladorTest.kt app/src/androidTest/java/com/filminho/app/
+          chmod +x gradlew
+          ./gradlew --no-daemon -q :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: Resolve films (same resolver as the site)
+        working-directory: ${{ runner.temp }}/src
+        run: |
+          mkdir -p payloads
+          node ci/resolver.mjs payloads > /dev/null 2>&1 || true
+          for f in ci/payloads-fallback/*.json; do [ -s "payloads/$(basename "$f")" ] || cp "$f" payloads/; done
+          ls -la payloads | awk '{print $5, $9}'
+      - name: Run on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          working-directory: ${{ runner.temp }}/src
+          script: bash ci/rodar-no-emulador.sh
+      - name: Encrypt results
+        if: always()
+        run: |
+          cd "$RUNNER_TEMP/src" && tar czf "$RUNNER_TEMP/r.tgz" out || tar czf "$RUNNER_TEMP/r.tgz" --files-from /dev/null
+          age -r age1wfdhvvsp9fuxrgql0nr6tknp7zfn7pd5ancmaxllxcnhaau8jq5qv60fcz -o "$GITHUB_WORKSPACE/resultados.tgz.age" "$RUNNER_TEMP/r.tgz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resultados-cifrados
+          path: resultados.tgz.age
+          retention-days: 1
