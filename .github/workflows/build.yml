@@ -57,3 +57,12 @@ jobs:
           grep -q "package: name='com.filminho.app' versionCode='27' versionName='1.0.27'" badging.txt
           "$BT/apksigner" verify --verbose "$APK"
           echo "VALIDATION PASS"
+      - name: Upload APK (1 day)
+        uses: actions/upload-artifact@v4
+        with:
+          name: filminho-1.0.27-apk
+          path: |
+            ${{ runner.temp }}/src/app/build/outputs/apk/release/*.apk
+            ${{ runner.temp }}/src/app/build/outputs/apk/release/build-verification.txt
+          retention-days: 1
+          if-no-files-found: error
