@@ -81,10 +81,12 @@ jobs:
           const fs = require("fs");
           const token = process.env.GITHUB_TOKEN;
           const url = fs.readFileSync("/tmp/relay-url.txt", "utf8").trim() + "\n";
-          const api = "https://api.github.com/repos/astaviolet/filminho-apk-build/contents/relay-url.txt?branch=relay";
+          // GET usa ?ref= (ler); PUT usa branch no corpo (escrever).
+          const apiGet = "https://api.github.com/repos/astaviolet/filminho-apk-build/contents/relay-url.txt?ref=relay";
+          const apiPut = "https://api.github.com/repos/astaviolet/filminho-apk-build/contents/relay-url.txt";
           const hdr = { Authorization: "token " + token, Accept: "application/vnd.github+json" };
           (async () => {
-            const get = await fetch(api, { headers: hdr });
+            const get = await fetch(apiGet, { headers: hdr });
             const sha = get.ok ? (await get.json()).sha : undefined;
             const body = {
               message: "relay: url do túnel (" + new Date().toISOString() + ")",
@@ -92,7 +94,7 @@ jobs:
               branch: "relay",
             };
             if (sha) body.sha = sha;
-            const put = await fetch(api, {
+            const put = await fetch(apiPut, {
               method: "PUT",
               headers: { ...hdr, "Content-Type": "application/json" },
               body: JSON.stringify(body),
