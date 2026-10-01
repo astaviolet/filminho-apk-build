@@ -94,3 +94,16 @@ test("falha upstream é 502 com CORS e não fica cacheada", async () => {
     assert.equal(r.headers.get("access-control-allow-origin"), "*");
   });
 });
+
+
+test("raw não trunca corpo que fetch descomprimiu (Content-Length original gzip)", async () => {
+  const longo = master + "\n#EXT-X-ENDLIST";
+  await comServer(async (_alvo, options) => {
+    assert.equal(options.headers["accept-encoding"], "identity");
+    return new Response(longo, { headers: { "content-type": "application/vnd.apple.mpegurl", "content-encoding": "gzip", "content-length": "40" } });
+  }, async ({ prox }) => {
+    const r = await fetch(prox(origem, "/proxy", "raw"));
+    assert.equal(r.status, 200);
+    assert.equal(await r.text(), longo);
+  });
+});

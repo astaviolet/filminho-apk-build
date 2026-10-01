@@ -70,7 +70,7 @@ export function reescreverPlaylist(texto, origem, base, segredo) {
 }
 
 function headersDaOrigem(alvo, range) {
-  const h = { "user-agent": UA };
+  const h = { "user-agent": UA, "accept-encoding": "identity" };
   if (range) h.range = range;
   const url = new URL(alvo);
   if (url.hostname === "streamdata.vaplayer.ru") {
@@ -147,7 +147,10 @@ export function criarRelay({ segredo, buscar = fetch, iniciadoEm = Date.now() } 
       const h = { ...CORS, "content-type": tipo, "cache-control": fmt === "raw" ? "no-store" : "public, max-age=120", "accept-ranges": "bytes" };
       for (const nome of ["content-range", "content-length"]) {
         const valor = upstream.headers.get(nome);
-        if (valor) h[nome] = valor;
+        // fetch descomprime gzip/br automaticamente. O Content-Length
+        // original seria o tamanho COMPRIMIDO, truncando o corpo raw.
+        const descomprimido = /gzip|br|deflate/i.test(upstream.headers.get("content-encoding") || "");
+        if (valor && !(nome === "content-length" && descomprimido)) h[nome] = valor;
       }
       res.writeHead(upstream.status, h);
       if (!upstream.body) { res.end(); return; }
