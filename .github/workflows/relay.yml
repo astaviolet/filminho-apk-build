@@ -1,0 +1,123 @@
+name: relay-video
+
+# Relay de vídeo sempre-ligado: o IP do runner (Azure) alcança as CDNs que o
+# Cloudflare do app NÃO alcança (VaPlayer 403 / Vidlink 427-428 — sondado em
+# egress-probe.yml). O job sobe relay/server.mjs + túnel cloudflared e publica
+# a URL pública na branch `relay` (relay-url.txt) para o app descobrir.
+#
+# Limite do GitHub: job morre em 6h → o cron (a cada 30 min) verifica se o
+# relay publicado está vivo (/health) e, se não estiver, religa. A janela de
+# reinício é de ~1-2 min a cada ~6h; o app faz health-check e cai pro
+# fallback quando o relay está fora.
+on:
+  workflow_dispatch:
+    inputs:
+      forcar:
+        description: "Forçar reinício mesmo com relay vivo"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "7,37 * * * *"
+  push:
+    branches: [main]
+    paths:
+      - "relay/**"
+      - ".github/workflows/relay.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      RELAY_SIG: ${{ secrets.RELAY_SIG }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sair se já existe relay vivo
+        id: vivo
+        run: |
+          BASE=$(curl -sf --max-time 10 "https://raw.githubusercontent.com/astaviolet/filminho-apk-build/relay/relay-url.txt" 2>/dev/null | tr -d '[:space:]' || true)
+          if [ "${{ github.event.inputs.forcar }}" != "true" ] && [ -n "$BASE" ] && [ "$BASE" != "pendente" ] && curl -sf --max-time 8 "$BASE/health" >/dev/null 2>&1; then
+            echo "Relay vivo em $BASE — nada a fazer."
+            echo "vivo=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "vivo=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Baixar cloudflared
+        if: steps.vivo.outputs.vivo == '0'
+        run: |
+          curl -sL --max-time 180 -o /tmp/cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared --version
+
+      - name: Subir túnel e capturar URL pública
+        if: steps.vivo.outputs.vivo == '0'
+        run: |
+          /tmp/cloudflared tunnel --url http://127.0.0.1:8388 --no-autoupdate > /tmp/tunnel.log 2>&1 &
+          URL=""
+          for i in $(seq 1 60); do
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/tunnel.log | head -1 || true)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          if [ -z "$URL" ]; then
+            echo "SEM URL DE TÚNEL:"; cat /tmp/tunnel.log; exit 1
+          fi
+          echo "$URL" > /tmp/relay-url.txt
+          echo "RELAY_BASE=$URL" >> "$GITHUB_ENV"
+          echo "Túnel: $URL"
+
+      - name: Publicar URL na branch relay
+        if: steps.vivo.outputs.vivo == '0'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node - <<'EOF'
+          const fs = require("fs");
+          const token = process.env.GITHUB_TOKEN;
+          const url = fs.readFileSync("/tmp/relay-url.txt", "utf8").trim() + "\n";
+          const api = "https://api.github.com/repos/astaviolet/filminho-apk-build/contents/relay-url.txt?branch=relay";
+          const hdr = { Authorization: "token " + token, Accept: "application/vnd.github+json" };
+          (async () => {
+            const get = await fetch(api, { headers: hdr });
+            const sha = get.ok ? (await get.json()).sha : undefined;
+            const body = {
+              message: "relay: url do túnel (" + new Date().toISOString() + ")",
+              content: Buffer.from(url).toString("base64"),
+              branch: "relay",
+            };
+            if (sha) body.sha = sha;
+            const put = await fetch(api, {
+              method: "PUT",
+              headers: { ...hdr, "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            });
+            console.log("publicação:", put.status);
+            if (!put.ok) {
+              console.log(await put.text());
+              process.exit(1);
+            }
+          })();
+          EOF
+
+      - name: Esperar o túnel responder ao /health pela URL pública
+        if: steps.vivo.outputs.vivo == '0'
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf --max-time 10 "$RELAY_BASE/health" >/dev/null 2>&1; then
+              echo "Relay no ar: $RELAY_BASE"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Túnel não respondeu ao health-check"; tail -20 /tmp/tunnel.log; exit 1
+
+      - name: Rodar o relay (até o limite de 6h do runner)
+        if: steps.vivo.outputs.vivo == '0'
+        env:
+          PORT: 8388
+        run: node relay/server.mjs
