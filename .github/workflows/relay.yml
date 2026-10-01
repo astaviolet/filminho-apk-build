@@ -107,19 +107,37 @@ jobs:
           })();
           EOF
 
+      - name: Subir o relay e aguardar a porta
+        if: steps.vivo.outputs.vivo == '0'
+        env:
+          PORT: 8388
+        run: |
+          node relay/server.mjs > /tmp/relay.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf --max-time 5 "http://127.0.0.1:8388/health" >/dev/null 2>&1; then
+              echo "Relay local no ar."; cat /tmp/relay.log; exit 0
+            fi
+            sleep 1
+          done
+          echo "Relay local não subiu:"; cat /tmp/relay.log; exit 1
+
       - name: Esperar o túnel responder ao /health pela URL pública
         if: steps.vivo.outputs.vivo == '0'
         run: |
           for i in $(seq 1 30); do
             if curl -sf --max-time 10 "$RELAY_BASE/health" >/dev/null 2>&1; then
-              echo "Relay no ar: $RELAY_BASE"; exit 0
+              echo "Relay público no ar: $RELAY_BASE"; exit 0
             fi
             sleep 2
           done
           echo "Túnel não respondeu ao health-check"; tail -20 /tmp/tunnel.log; exit 1
 
-      - name: Rodar o relay (até o limite de 6h do runner)
+      - name: Manter o job vivo (relay serve em background até o limite de 6h)
         if: steps.vivo.outputs.vivo == '0'
-        env:
-          PORT: 8388
-        run: node relay/server.mjs
+        run: |
+          for i in $(seq 1 2100); do
+            sleep 10
+            if ! curl -sf --max-time 15 "http://127.0.0.1:8388/health" >/dev/null 2>&1; then
+              echo "Relay morreu — encerrando o job p/ o cron religar."; tail -5 /tmp/relay.log || true; exit 1
+            fi
+          done
