@@ -1,0 +1,68 @@
+name: Build Filminho APK 1.0.34
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-apk
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+      - name: Keep only Build-Tools 35.0.0
+        run: |
+          for d in "$ANDROID_SDK_ROOT"/build-tools/*; do
+            [ "$(basename "$d")" = "35.0.0" ] || rm -rf "$d"
+          done
+          ls "$ANDROID_SDK_ROOT/build-tools"
+      - name: Decrypt project (age)
+        env:
+          AGE_KEY: ${{ secrets.AGE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          sudo apt-get install -y -qq age >/dev/null
+          KEYFILE="$RUNNER_TEMP/age.key"
+          printf '%s\n' "$AGE_KEY" > "$KEYFILE"
+          mkdir -p "$RUNNER_TEMP/src"
+          age -d -i "$KEYFILE" -o "$RUNNER_TEMP/in.zip" build-input.zip.age
+          rm -f "$KEYFILE"
+          unzip -q "$RUNNER_TEMP/in.zip" -d "$RUNNER_TEMP/src"
+          rm -f "$RUNNER_TEMP/in.zip"
+          test ! -e "$RUNNER_TEMP/src/app/release.keystore"
+      - name: Run build-release.sh
+        working-directory: ${{ runner.temp }}/src
+        run: bash ./build-release.sh
+      - name: Independent validation
+        working-directory: ${{ runner.temp }}/src
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -n1)
+          "$BT/aapt" dump badging "$APK" | head -n1 | tee badging.txt
+          grep -q "package: name='com.filminho.app' versionCode='34' versionName='1.0.34'" badging.txt
+          "$BT/apksigner" verify --verbose "$APK"
+          echo "VALIDATION PASS"
+      - name: Upload APK (1 day)
+        uses: actions/upload-artifact@v4
+        with:
+          name: filminho-1.0.34-apk
+          path: |
+            ${{ runner.temp }}/src/app/build/outputs/apk/release/*.apk
+            ${{ runner.temp }}/src/app/build/outputs/apk/release/build-verification.txt
+          retention-days: 1
+          if-no-files-found: error
