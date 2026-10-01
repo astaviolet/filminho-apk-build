@@ -1,19 +1,14 @@
 name: relay-video
 
-# Relay de vídeo sempre-ligado: o IP do runner (Azure) alcança as CDNs que o
-# Cloudflare do app NÃO alcança (VaPlayer 403 / Vidlink 427-428 — sondado em
-# egress-probe.yml). O job sobe relay/server.mjs + túnel cloudflared e publica
-# a URL pública na branch `relay` (relay-url.txt) para o app descobrir.
-#
-# Limite do GitHub: job morre em 6h → o cron (a cada 30 min) verifica se o
-# relay publicado está vivo (/health) e, se não estiver, religa. A janela de
-# reinício é de ~1-2 min a cada ~6h; o app faz health-check e cai pro
-# fallback quando o relay está fora.
+# Infraestrutura do relay. Nenhum código-fonte do app neste repositório.
+# Troca preventiva a partir de 5h: o novo túnel só é publicado DEPOIS do
+# health-check; o job anterior continua atendendo os players já abertos.
+# Cron do GitHub pode atrasar — isto não é uma garantia de disponibilidade.
 on:
   workflow_dispatch:
     inputs:
       forcar:
-        description: "Forçar reinício mesmo com relay vivo"
+        description: "Forçar novo relay mesmo com o anterior vivo"
         type: boolean
         default: false
   schedule:
@@ -35,29 +30,49 @@ jobs:
       RELAY_SIG: ${{ secrets.RELAY_SIG }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Sair se já existe relay vivo
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Testes da infraestrutura
+        run: node --test relay/server.test.mjs
+      - name: Verificar relay publicado
         id: vivo
+        env:
+          EVENTO: ${{ github.event_name }}
+          FORCAR: ${{ github.event.inputs.forcar }}
         run: |
-          BASE=$(curl -sf --max-time 10 "https://raw.githubusercontent.com/astaviolet/filminho-apk-build/relay/relay-url.txt" 2>/dev/null | tr -d '[:space:]' || true)
-          if [ "${{ github.event.inputs.forcar }}" != "true" ] && [ -n "$BASE" ] && [ "$BASE" != "pendente" ] && curl -sf --max-time 8 "$BASE/health" >/dev/null 2>&1; then
-            echo "Relay vivo em $BASE — nada a fazer."
-            echo "vivo=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "vivo=0" >> "$GITHUB_OUTPUT"
-          fi
-
+          node - <<'EOF'
+          const fs = require("fs");
+          (async () => {
+            let vivo = false;
+            try {
+              const r = await fetch("https://raw.githubusercontent.com/astaviolet/filminho-apk-build/relay/relay-url.txt?v=" + Math.floor(Date.now()/30000), { signal: AbortSignal.timeout(10000) });
+              const base = (await r.text()).trim();
+              if (r.ok && /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(base)) {
+                const h = await fetch(base + "/health", { signal: AbortSignal.timeout(10000) });
+                const inicio = Date.parse(h.headers.get("x-relay-started-at") || "");
+                vivo = h.ok && (await h.text()).startsWith("ok ") && h.headers.get("x-relay-version") === "2" && Date.now() - inicio < 5*3600000;
+              }
+            } catch {}
+            // Push de atualização inicia a versão nova. Não cancela a velha.
+            if (process.env.EVENTO === "push" || process.env.FORCAR === "true") vivo = false;
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `vivo=${vivo ? 1 : 0}\n`);
+            console.log(vivo ? "Relay recente e vivo — nada a fazer." : "Iniciar relay novo.");
+          })();
+          EOF
       - name: Baixar cloudflared
         if: steps.vivo.outputs.vivo == '0'
         run: |
-          curl -sL --max-time 180 -o /tmp/cloudflared \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          set -euo pipefail
+          curl -fLsS --max-time 180 -o /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x /tmp/cloudflared
           /tmp/cloudflared --version
-
-      - name: Subir túnel e capturar URL pública
+      - name: Subir servidor e túnel
         if: steps.vivo.outputs.vivo == '0'
         run: |
+          set -euo pipefail
+          PORT=8388 node relay/server.mjs > /tmp/relay.log 2>&1 &
+          curl --retry 15 --retry-connrefused --retry-delay 1 -fsS --max-time 5 http://127.0.0.1:8388/health
           /tmp/cloudflared tunnel --url http://127.0.0.1:8388 --no-autoupdate > /tmp/tunnel.log 2>&1 &
           URL=""
           for i in $(seq 1 60); do
@@ -65,79 +80,47 @@ jobs:
             [ -n "$URL" ] && break
             sleep 2
           done
-          if [ -z "$URL" ]; then
-            echo "SEM URL DE TÚNEL:"; cat /tmp/tunnel.log; exit 1
-          fi
+          if [ -z "$URL" ]; then cat /tmp/tunnel.log; exit 1; fi
           echo "$URL" > /tmp/relay-url.txt
           echo "RELAY_BASE=$URL" >> "$GITHUB_ENV"
-          echo "Túnel: $URL"
-
-      - name: Publicar URL na branch relay
+      - name: Verificar túnel ANTES de publicar
+        if: steps.vivo.outputs.vivo == '0'
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            CODE=$(curl -sS --max-time 10 -o /tmp/health.txt -w '%{http_code}' "$RELAY_BASE/health" || true)
+            if [ "$CODE" = "200" ] && grep -q '^ok ' /tmp/health.txt; then
+              echo "Relay público responde: $RELAY_BASE"; exit 0
+            fi
+            sleep 2
+          done
+          tail -20 /tmp/tunnel.log; cat /tmp/relay.log; exit 1
+      - name: Publicar URL viva na branch relay
         if: steps.vivo.outputs.vivo == '0'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           node - <<'EOF'
           const fs = require("fs");
-          const token = process.env.GITHUB_TOKEN;
-          const url = fs.readFileSync("/tmp/relay-url.txt", "utf8").trim() + "\n";
-          // GET usa ?ref= (ler); PUT usa branch no corpo (escrever).
-          const apiGet = "https://api.github.com/repos/astaviolet/filminho-apk-build/contents/relay-url.txt?ref=relay";
-          const apiPut = "https://api.github.com/repos/astaviolet/filminho-apk-build/contents/relay-url.txt";
-          const hdr = { Authorization: "token " + token, Accept: "application/vnd.github+json" };
           (async () => {
-            const get = await fetch(apiGet, { headers: hdr });
-            const sha = get.ok ? (await get.json()).sha : undefined;
-            const body = {
-              message: "relay: url do túnel (" + new Date().toISOString() + ")",
-              content: Buffer.from(url).toString("base64"),
-              branch: "relay",
-            };
-            if (sha) body.sha = sha;
-            const put = await fetch(apiPut, {
-              method: "PUT",
-              headers: { ...hdr, "Content-Type": "application/json" },
-              body: JSON.stringify(body),
-            });
-            console.log("publicação:", put.status);
-            if (!put.ok) {
-              console.log(await put.text());
-              process.exit(1);
-            }
-          })();
+            const api = "https://api.github.com/repos/astaviolet/filminho-apk-build/contents/relay-url.txt";
+            const hdr = { Authorization: "Bearer " + process.env.GITHUB_TOKEN, Accept: "application/vnd.github+json" };
+            const get = await fetch(api + "?ref=relay", { headers: hdr });
+            if (!get.ok) throw new Error("não consegui o sha da URL publicada: " + get.status);
+            const sha = (await get.json()).sha;
+            const body = { sha, branch: "relay", message: "relay: túnel vivo " + new Date().toISOString(), content: Buffer.from(fs.readFileSync("/tmp/relay-url.txt", "utf8")).toString("base64") };
+            const put = await fetch(api, { method: "PUT", headers: { ...hdr, "content-type": "application/json" }, body: JSON.stringify(body) });
+            if (!put.ok) throw new Error("publicação falhou: " + put.status + " " + await put.text());
+            console.log("URL viva publicada.");
+          })().catch(e => { console.error(e); process.exit(1); });
           EOF
-
-      - name: Subir o relay e aguardar a porta
-        if: steps.vivo.outputs.vivo == '0'
-        env:
-          PORT: 8388
-        run: |
-          node relay/server.mjs > /tmp/relay.log 2>&1 &
-          for i in $(seq 1 30); do
-            if curl -sf --max-time 5 "http://127.0.0.1:8388/health" >/dev/null 2>&1; then
-              echo "Relay local no ar."; cat /tmp/relay.log; exit 0
-            fi
-            sleep 1
-          done
-          echo "Relay local não subiu:"; cat /tmp/relay.log; exit 1
-
-      - name: Esperar o túnel responder ao /health pela URL pública
-        if: steps.vivo.outputs.vivo == '0'
-        run: |
-          for i in $(seq 1 30); do
-            if curl -sf --max-time 10 "$RELAY_BASE/health" >/dev/null 2>&1; then
-              echo "Relay público no ar: $RELAY_BASE"; exit 0
-            fi
-            sleep 2
-          done
-          echo "Túnel não respondeu ao health-check"; tail -20 /tmp/tunnel.log; exit 1
-
-      - name: Manter o job vivo (relay serve em background até o limite de 6h)
+      - name: Atender até o limite do job
         if: steps.vivo.outputs.vivo == '0'
         run: |
           for i in $(seq 1 2100); do
             sleep 10
-            if ! curl -sf --max-time 15 "http://127.0.0.1:8388/health" >/dev/null 2>&1; then
-              echo "Relay morreu — encerrando o job p/ o cron religar."; tail -5 /tmp/relay.log || true; exit 1
+            CODE=$(curl -sS --max-time 15 -o /tmp/local-health.txt -w '%{http_code}' http://127.0.0.1:8388/health || true)
+            if [ "$CODE" != "200" ] || ! grep -q '^ok ' /tmp/local-health.txt; then
+              tail -10 /tmp/relay.log; exit 1
             fi
           done
