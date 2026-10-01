@@ -1,0 +1,43 @@
+name: egress-probe
+
+# Sonda de egresso: mede o que o IP do runner do GitHub alcança nas CDNs de
+# vídeo (VaPlayer/mediasoup) que o Cloudflare NÃO alcança (403) e que o
+# navegador não alcança (403 em segmento com Origin). Se o runner alcançar,
+# um relay hospedado aqui é tecnicamente possível. Não contém código-fonte
+# do app — só curls de diagnóstico.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Medir egresso do runner
+        run: |
+          set -x
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+          NEUTRAL="curl/8.5.0"
+          API="https://streamdata.vaplayer.ru/api.php?imdb=tt0165623&type=movie"
+          curl -sS --max-time 20 -o /tmp/vp.json -w "API VaPlayer: %{http_code}\n" \
+            -H "referer: https://nextgencloudfabric.com/embed/movie/tt0165623" \
+            -H "origin: https://nextgencloudfabric.com" -H "user-agent: $UA" "$API" || echo "API: FALHA"
+          VAP=$(python3 -c "import json;print(json.load(open('/tmp/vp.json'))['data']['stream_urls'][0])" 2>/dev/null || echo "")
+          echo "MASTER=$VAP"
+          curl -sS --max-time 20 -o /tmp/master.m3u8 -w "MASTER neutro: %{http_code}\n" -H "user-agent: $NEUTRAL" "$VAP" || echo "MASTER: FALHA"
+          curl -sS --max-time 20 -o /tmp/master2.m3u8 -w "MASTER ua-browser: %{http_code}\n" -H "user-agent: $UA" "$VAP" || echo "MASTER2: FALHA"
+          MEDIA=$(grep -v '^#' /tmp/master.m3u8 | tail -1)
+          ABS=$(python3 -c "import sys;from urllib.parse import urljoin;print(urljoin(sys.argv[1],sys.argv[2]))" "$VAP" "$MEDIA")
+          echo "MEDIA=$ABS"
+          curl -sS --max-time 20 -o /tmp/media.m3u8 -w "MEDIA neutro: %{http_code}\n" -H "user-agent: $NEUTRAL" "$ABS" || echo "MEDIA: FALHA"
+          SEG=$(grep -v '^#' /tmp/media.m3u8 | head -1)
+          SABS=$(python3 -c "import sys;from urllib.parse import urljoin;print(urljoin(sys.argv[1],sys.argv[2]))" "$ABS" "$SEG")
+          echo "SEG=$SABS"
+          curl -sS --max-time 30 -o /tmp/seg.ts -w "SEG neutro: %{http_code} bytes=%{size_download}\n" -H "user-agent: $NEUTRAL" -r 0-200000 "$SABS" || echo "SEG: FALHA"
+          curl -sS --max-time 20 -o /tmp/vid.json -w "API Vidlink: %{http_code}\n" -H "user-agent: $UA" "https://vidlink.pro/movie/tt0165623" || echo "VIDLINK: FALHA"
+          head -c 300 /tmp/vid.json; echo
+          echo "IP público do runner:"
+          curl -s --max-time 10 https://api.ipify.org; echo
