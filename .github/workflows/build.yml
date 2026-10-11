@@ -38,18 +38,11 @@ jobs:
           sudo apt-get install -y -qq age >/dev/null
           KEYFILE="$RUNNER_TEMP/age.key"
           printf '%s\n' "$AGE_KEY" > "$KEYFILE"
-          PUBKEY=$(age-keygen -y "$KEYFILE")
           mkdir -p "$RUNNER_TEMP/src"
           age -d -i "$KEYFILE" -o "$RUNNER_TEMP/in.zip" build-input.zip.age
           rm -f "$KEYFILE"
           unzip -q "$RUNNER_TEMP/in.zip" -d "$RUNNER_TEMP/src"
           rm -f "$RUNNER_TEMP/in.zip"
-          if [ -f overlay.zip ]; then
-            unzip -oq overlay.zip -d "$RUNNER_TEMP/src"
-          fi
-          (cd "$RUNNER_TEMP/src" && zip -rq "$RUNNER_TEMP/out-input.zip" .)
-          age -r "$PUBKEY" -o "$RUNNER_TEMP/build-input-37.zip.age" "$RUNNER_TEMP/out-input.zip"
-          rm -f "$RUNNER_TEMP/out-input.zip"
           test ! -e "$RUNNER_TEMP/src/app/release.keystore"
       - name: Run build-release.sh
         working-directory: ${{ runner.temp }}/src
@@ -58,7 +51,7 @@ jobs:
         working-directory: ${{ runner.temp }}/src
         run: |
           set -euo pipefail
-          BT="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          BT="$ANDROID_SDK_ROOT"/build-tools/35.0.0
           APK=$(ls app/build/outputs/apk/release/*.apk | head -n1)
           "$BT/aapt" dump badging "$APK" | head -n1 | tee badging.txt
           grep -q "package: name='com.filminho.app' versionCode='37' versionName='1.0.37'" badging.txt
@@ -72,6 +65,5 @@ jobs:
           path: |
             ${{ runner.temp }}/src/app/build/outputs/apk/release/*.apk
             ${{ runner.temp }}/src/app/build/outputs/apk/release/build-verification.txt
-            ${{ runner.temp }}/build-input-37.zip.age
           retention-days: 1
           if-no-files-found: error
