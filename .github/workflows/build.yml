@@ -38,6 +38,9 @@ jobs:
           sudo apt-get install -y -qq age >/dev/null
           KEYFILE="$RUNNER_TEMP/age.key"
           printf '%s\n' "$AGE_KEY" > "$KEYFILE"
+          PUBLIC_RECIPIENT="$(age-keygen -y "$KEYFILE")"
+          printf 'Age public recipient: %s\n' "$PUBLIC_RECIPIENT"
+          printf 'Age public recipient: `%s`\n' "$PUBLIC_RECIPIENT" >> "$GITHUB_STEP_SUMMARY"
           mkdir -p "$RUNNER_TEMP/src"
           age -d -i "$KEYFILE" -o "$RUNNER_TEMP/in.zip" build-input.zip.age
           rm -f "$KEYFILE"
