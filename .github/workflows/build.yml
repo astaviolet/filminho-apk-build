@@ -109,7 +109,18 @@ jobs:
           git add filminho.apk
           if ! git diff --cached --quiet; then
             git commit -m "chore: publish Filminho APK 1.0.38"
-            git -c "http.extraheader=AUTHORIZATION: bearer ${GITHUB_TOKEN}" push origin HEAD:refs/heads/apk
+            ASKPASS="$RUNNER_TEMP/git-askpass.sh"
+            cat > "$ASKPASS" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' 'x-access-token' ;;
+            *Password*) printf '%s\n' "$GITHUB_TOKEN" ;;
+            *) printf '\n' ;;
+          esac
+          SH
+            chmod 700 "$ASKPASS"
+            GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git push origin HEAD:refs/heads/apk
+            rm -f "$ASKPASS"
           fi
 
           cd "$GITHUB_WORKSPACE"
